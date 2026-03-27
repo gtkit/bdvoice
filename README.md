@@ -24,6 +24,36 @@
 go get github.com/gtkit/bdvoice@latest
 ```
 
+## 集成测试
+
+默认 `go test ./...` 不会访问百度真实服务。要执行端到端集成验证，设置环境变量后运行：
+
+```bash
+BDVOICE_RUN_INTEGRATION=1 \
+BDVOICE_CLIENT_ID=your-client-id \
+BDVOICE_CLIENT_SECRET=your-client-secret \
+BDVOICE_VOICE_ID=12345 \
+/usr/local/go/bin/go test -v -run '^TestIntegration_' ./...
+```
+
+或使用 Makefile：
+
+```bash
+BDVOICE_CLIENT_ID=your-client-id \
+BDVOICE_CLIENT_SECRET=your-client-secret \
+BDVOICE_VOICE_ID=12345 \
+make integration
+```
+
+可选变量：
+
+- `BDVOICE_AUTH_MODE=apikey`：改用 API Key 模式，并提供 `BDVOICE_API_KEY`
+- `BDVOICE_BASE_URL`：覆盖默认百度域名，便于私有化/代理环境
+- `BDVOICE_TTS_TEXT`：覆盖默认 TTS 测试文本
+- `BDVOICE_AUDIO_URL`：提供训练音频 URL 后，额外执行 `CreateVoice` 集成测试
+- `BDVOICE_VOICE_NAME`：覆盖创建音色时使用的名称
+- `BDVOICE_LANG`：创建音色时的语种，默认 `zh`
+
 ## 代码结构
 
 ```
@@ -260,6 +290,9 @@ func synthesizeWithRead(client *bdvoice.Client, voiceID int) {
         log.Fatal(err)
     }
     defer session.Close() // 确保连接释放
+
+    // 如果需要显式发送 0 值（例如最低音调/最慢语速），使用 setter：
+    // cfg := (&bdvoice.TTSConfig{MediaType: bdvoice.MediaMP3}).SetPitch(0).SetSpeed(0)
 
     // 可选：打印 session_id，用于问题排查
     fmt.Printf("Session ID: %s\n", session.SessionID())

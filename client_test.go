@@ -313,6 +313,79 @@ func TestGetAccessToken_OAuthError(t *testing.T) {
 	}
 }
 
+func TestGetAccessToken_CanceledLeaderDoesNotFailFollowers(t *testing.T) {
+	var callCount atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
+		if got := r.Header.Get("Content-Type"); got != "" {
+			t.Errorf("unexpected content-type header %q", got)
+		}
+		close(started)
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "shared-token",
+			"expires_in":   86400,
+		})
+	}))
+	defer server.Close()
+
+	client, err := New(
+		WithClientCredentials("id", "secret"),
+		WithBaseURL(server.URL),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leaderCtx, cancelLeader := context.WithCancel(t.Context())
+	leaderErrCh := make(chan error, 1)
+	followerTokenCh := make(chan string, 1)
+	followerErrCh := make(chan error, 1)
+
+	go func() {
+		_, err := client.getAccessToken(leaderCtx)
+		leaderErrCh <- err
+	}()
+
+	<-started
+
+	go func() {
+		token, err := client.getAccessToken(t.Context())
+		if err != nil {
+			followerErrCh <- err
+			return
+		}
+		followerTokenCh <- token
+	}()
+
+	cancelLeader()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	if err := <-leaderErrCh; err != context.Canceled {
+		t.Fatalf("leader err = %v, want %v", err, context.Canceled)
+	}
+
+	select {
+	case err := <-followerErrCh:
+		t.Fatalf("follower err: %v", err)
+	case token := <-followerTokenCh:
+		if token != "shared-token" {
+			t.Fatalf("token = %q, want %q", token, "shared-token")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("follower timed out waiting for token")
+	}
+
+	if callCount.Load() != 1 {
+		t.Fatalf("server called %d times, want 1", callCount.Load())
+	}
+}
+
 // ============================================================================
 // CreateVoice 测试
 // ============================================================================

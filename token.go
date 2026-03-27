@@ -22,20 +22,29 @@ func (c *Client) getAccessToken(ctx context.Context) (string, error) {
 		return cached.AccessToken, nil
 	}
 
-	// 慢路径：singleflight 去重刷新
-	v, err, _ := c.tokenGroup.Do("token", func() (any, error) {
+	// 慢路径：singleflight 去重刷新。
+	// 刷新动作使用独立 context，避免首个调用者的取消信号连带失败其他等待者；
+	// 每个调用方仍然通过自己的 ctx 决定是否继续等待结果。
+	resultCh := c.tokenGroup.DoChan("token", func() (any, error) {
 		// double-check：进入 singleflight 后再次检查，
 		// 可能在排队期间已被其他 goroutine 刷新。
 		if cached := c.token.Load(); cached.valid() {
 			return cached.AccessToken, nil
 		}
-		return c.refreshToken(ctx)
+		refreshCtx, cancel := c.tokenRefreshContext(ctx)
+		defer cancel()
+		return c.refreshToken(refreshCtx)
 	})
-	if err != nil {
-		return "", err
-	}
 
-	return v.(string), nil
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return "", result.Err
+		}
+		return result.Val.(string), nil
+	}
 }
 
 // refreshToken 向百度 OAuth 服务请求新的 access_token。
@@ -52,7 +61,6 @@ func (c *Client) refreshToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("bdvoice: build token request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -61,9 +69,12 @@ func (c *Client) refreshToken(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("bdvoice: read token response: %w", err)
+	}
+	if len(body) > maxResponseBodyBytes {
+		return "", fmt.Errorf("bdvoice: token response exceeds %d bytes", maxResponseBodyBytes)
 	}
 
 	// 检查 OAuth 错误响应
@@ -94,6 +105,15 @@ func (c *Client) refreshToken(ctx context.Context) (string, error) {
 	c.token.Store(&cache)
 
 	return cache.AccessToken, nil
+}
+
+func (c *Client) tokenRefreshContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	refreshCtx := context.WithoutCancel(ctx)
+	timeout := c.httpClient.Timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second // 兜底
+	}
+	return refreshCtx, func() {}
 }
 
 // buildAuthQuery 构建带鉴权参数的 URL query string。

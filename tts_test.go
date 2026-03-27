@@ -2,6 +2,7 @@ package bdvoice
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -124,8 +126,8 @@ func TestTTSSession_FullFlow(t *testing.T) {
 	session := &TTSSession{
 		conn:    conn,
 		audioCh: make(chan []byte, 64),
-		errCh:   make(chan error, 1),
 		done:    make(chan struct{}),
+		closeCh: make(chan struct{}),
 	}
 
 	// 发送 start
@@ -222,8 +224,8 @@ func TestTTSSession_Stream(t *testing.T) {
 	session := &TTSSession{
 		conn:    conn,
 		audioCh: make(chan []byte, 64),
-		errCh:   make(chan error, 1),
 		done:    make(chan struct{}),
+		closeCh: make(chan struct{}),
 	}
 
 	session.sendStart(nil)
@@ -273,8 +275,8 @@ func TestTTSSession_ServerError(t *testing.T) {
 	session := &TTSSession{
 		conn:    conn,
 		audioCh: make(chan []byte, 64),
-		errCh:   make(chan error, 1),
 		done:    make(chan struct{}),
+		closeCh: make(chan struct{}),
 	}
 
 	session.sendStart(nil)
@@ -303,8 +305,8 @@ func TestTTSSession_SendTextValidation(t *testing.T) {
 	// 创建一个不需要真实连接的 session 来测试校验逻辑
 	session := &TTSSession{
 		audioCh: make(chan []byte, 1),
-		errCh:   make(chan error, 1),
 		done:    make(chan struct{}),
+		closeCh: make(chan struct{}),
 	}
 	// 状态设为 active
 	session.state.Store(int32(stateActive))
@@ -333,8 +335,8 @@ func TestTTSSession_SendTextValidation(t *testing.T) {
 func TestTTSSession_StateTransitions(t *testing.T) {
 	session := &TTSSession{
 		audioCh: make(chan []byte, 1),
-		errCh:   make(chan error, 1),
 		done:    make(chan struct{}),
+		closeCh: make(chan struct{}),
 	}
 
 	t.Run("finished state rejects SendText", func(t *testing.T) {
@@ -381,8 +383,8 @@ func TestTTSSession_StreamCancellation(t *testing.T) {
 	session := &TTSSession{
 		conn:    conn,
 		audioCh: make(chan []byte, 64),
-		errCh:   make(chan error, 1),
 		done:    make(chan struct{}),
+		closeCh: make(chan struct{}),
 	}
 	session.sendStart(nil)
 	session.waitStarted()
@@ -423,8 +425,8 @@ func TestTTSSession_CloseIdempotent(t *testing.T) {
 	session := &TTSSession{
 		conn:    conn,
 		audioCh: make(chan []byte, 64),
-		errCh:   make(chan error, 1),
 		done:    make(chan struct{}),
+		closeCh: make(chan struct{}),
 	}
 	session.sendStart(nil)
 	session.waitStarted()
@@ -438,6 +440,50 @@ func TestTTSSession_CloseIdempotent(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+func TestTTSSession_CloseWithoutReadLoopDoesNotBlock(t *testing.T) {
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // start
+		conn.WriteJSON(wsResponse{
+			Type: wsTypeSystemStarted, Code: 0, Message: "success",
+		})
+		_, _, _ = conn.ReadMessage()
+	})
+	defer server.Close()
+
+	wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+	conn, _, err := websocket.DefaultDialer.DialContext(t.Context(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	session := &TTSSession{
+		conn:    conn,
+		audioCh: make(chan []byte, 64),
+		done:    make(chan struct{}),
+		closeCh: make(chan struct{}),
+	}
+	if err := session.sendStart(nil); err != nil {
+		t.Fatalf("sendStart: %v", err)
+	}
+	if err := session.waitStarted(); err != nil {
+		t.Fatalf("waitStarted: %v", err)
+	}
+
+	closed := make(chan error, 1)
+	go func() {
+		closed <- session.Close()
+	}()
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked without readLoop")
+	}
 }
 
 func TestTTSSession_InitError(t *testing.T) {
@@ -458,8 +504,8 @@ func TestTTSSession_InitError(t *testing.T) {
 	session := &TTSSession{
 		conn:    conn,
 		audioCh: make(chan []byte, 64),
-		errCh:   make(chan error, 1),
 		done:    make(chan struct{}),
+		closeCh: make(chan struct{}),
 	}
 	session.sendStart(&TTSConfig{SampleRate: 99999})
 	err := session.waitStarted()
@@ -472,5 +518,224 @@ func TestTTSSession_InitError(t *testing.T) {
 	}
 	if wsErr.Code != 216100 {
 		t.Errorf("code = %d, want 216100", wsErr.Code)
+	}
+}
+
+func TestTTSConfigMarshalJSON(t *testing.T) {
+	t.Run("omits unset zero values", func(t *testing.T) {
+		data, err := json.Marshal(&TTSConfig{MediaType: MediaMP3})
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		got := string(data)
+		if strings.Contains(got, "pitch") || strings.Contains(got, "speed") ||
+			strings.Contains(got, "volume") || strings.Contains(got, "sample_rate") {
+			t.Fatalf("unexpected numeric fields in %s", got)
+		}
+	})
+
+	t.Run("includes explicit zero values", func(t *testing.T) {
+		cfg := (&TTSConfig{MediaType: MediaMP3}).
+			SetPitch(0).
+			SetVolume(0).
+			SetSpeed(0).
+			SetSampleRate(0)
+
+		data, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+
+		var got map[string]any
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		for _, field := range []string{"pitch", "volume", "speed", "sample_rate"} {
+			if got[field] != float64(0) {
+				t.Fatalf("%s = %v, want 0; json=%s", field, got[field], string(data))
+			}
+		}
+	})
+}
+
+func TestTTSSession_ReadReturnsServerErrorAfterBufferedAudio(t *testing.T) {
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // start
+		conn.WriteJSON(wsResponse{
+			Type:    wsTypeSystemStarted,
+			Code:    0,
+			Message: "success",
+		})
+		conn.ReadMessage() // text
+		conn.WriteMessage(websocket.BinaryMessage, []byte("audio-1"))
+		conn.WriteJSON(wsResponse{
+			Type:    wsTypeSystemError,
+			Code:    216604,
+			Message: "Open api usage limit reached",
+		})
+	})
+	defer server.Close()
+
+	wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+	conn, _, err := websocket.DefaultDialer.DialContext(t.Context(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	session := &TTSSession{
+		conn:    conn,
+		audioCh: make(chan []byte, 64),
+		done:    make(chan struct{}),
+		closeCh: make(chan struct{}),
+	}
+	if err := session.sendStart(nil); err != nil {
+		t.Fatalf("sendStart: %v", err)
+	}
+	if err := session.waitStarted(); err != nil {
+		t.Fatalf("waitStarted: %v", err)
+	}
+	go session.readLoop()
+
+	if err := session.SendText(t.Context(), "test"); err != nil {
+		t.Fatalf("SendText: %v", err)
+	}
+
+	data, err := session.Read()
+	if err != nil {
+		t.Fatalf("first Read: %v", err)
+	}
+	if string(data) != "audio-1" {
+		t.Fatalf("first frame = %q, want %q", data, "audio-1")
+	}
+
+	_, err = session.Read()
+	if err == nil {
+		t.Fatal("expected server error")
+	}
+	wsErr, ok := IsWebSocketError(err)
+	if !ok {
+		t.Fatalf("expected WebSocketError, got %T: %v", err, err)
+	}
+	if wsErr.Code != 216604 {
+		t.Fatalf("code = %d, want 216604", wsErr.Code)
+	}
+}
+
+func TestTTSSession_CloseReturnsWhenAudioBufferIsFull(t *testing.T) {
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage() // start
+		conn.WriteJSON(wsResponse{
+			Type:    wsTypeSystemStarted,
+			Code:    0,
+			Message: "success",
+		})
+		conn.ReadMessage() // text
+		conn.WriteMessage(websocket.BinaryMessage, []byte("audio-1"))
+		conn.WriteMessage(websocket.BinaryMessage, []byte("audio-2"))
+		_, _, _ = conn.ReadMessage()
+	})
+	defer server.Close()
+
+	wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+	conn, _, err := websocket.DefaultDialer.DialContext(t.Context(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	session := &TTSSession{
+		conn:    conn,
+		audioCh: make(chan []byte, 1),
+		done:    make(chan struct{}),
+		closeCh: make(chan struct{}),
+	}
+	if err := session.sendStart(nil); err != nil {
+		t.Fatalf("sendStart: %v", err)
+	}
+	if err := session.waitStarted(); err != nil {
+		t.Fatalf("waitStarted: %v", err)
+	}
+	go session.readLoop()
+
+	if err := session.SendText(t.Context(), "test"); err != nil {
+		t.Fatalf("SendText: %v", err)
+	}
+
+	closed := make(chan error, 1)
+	go func() {
+		closed <- session.Close()
+	}()
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked with a full audio buffer")
+	}
+}
+
+func TestTTSSession_SendTextAndFinishHonorCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	session := &TTSSession{
+		audioCh: make(chan []byte, 1),
+		done:    make(chan struct{}),
+		closeCh: make(chan struct{}),
+	}
+	session.state.Store(int32(stateActive))
+
+	if err := session.SendText(ctx, "test"); err != context.Canceled {
+		t.Fatalf("SendText err = %v, want %v", err, context.Canceled)
+	}
+	if err := session.Finish(ctx); err != context.Canceled {
+		t.Fatalf("Finish err = %v, want %v", err, context.Canceled)
+	}
+}
+
+func TestClientNewTTSSessionUsesHTTPClientTLSConfig(t *testing.T) {
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		defer conn.Close()
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			t.Errorf("read start: %v", err)
+			return
+		}
+		if err := conn.WriteJSON(wsResponse{
+			Type:    wsTypeSystemStarted,
+			Code:    0,
+			Message: "success",
+			Headers: map[string]string{"session_id": "tls-session"},
+		}); err != nil {
+			t.Errorf("write started: %v", err)
+		}
+	})
+	tlsServer := httptest.NewTLSServer(server.Config.Handler)
+	defer server.Close()
+	defer tlsServer.Close()
+
+	client, err := New(
+		WithAPIKey("test-key"),
+		WithBaseURL(tlsServer.URL),
+		WithHTTPClient(&http.Client{
+			Timeout: 5 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	session, err := client.NewTTSSession(t.Context(), 12345, nil)
+	if err != nil {
+		t.Fatalf("NewTTSSession: %v", err)
+	}
+	defer session.Close()
+
+	if session.SessionID() != "tls-session" {
+		t.Fatalf("session id = %q, want %q", session.SessionID(), "tls-session")
 	}
 }

@@ -1,4 +1,4 @@
-.PHONY: tool check tag gittag
+.PHONY: tool check integration tag gittag
 
 
 LINT_TARGETS ?= ./...
@@ -12,6 +12,10 @@ tool: ## Lint Go code with the installed golangci-lint
 check:
 	govulncheck ./...
 	gosec ./...
+
+integration:
+	BDVOICE_RUN_INTEGRATION=1 /usr/local/go/bin/go test -v -run '^TestIntegration_' ./...
+
 tag:
 	@current=$$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' version.go | head -n1 | tr -d 'v'); \
 	if [ -z "$$current" ]; then echo "version not found in version.go"; exit 1; fi; \

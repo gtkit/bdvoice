@@ -73,6 +73,9 @@ func ExampleClient_NewTTSSession_read() {
 	ctx := context.Background()
 	voiceID := 12345 // 通过 CreateVoice 获取
 
+	// 如果需要显式发送 0，可使用 setter：
+	// cfg := (&bdvoice.TTSConfig{MediaType: bdvoice.MediaMP3}).SetPitch(0).SetSpeed(0)
+
 	// 创建 TTS 会话
 	session, err := client.NewTTSSession(ctx, voiceID, &bdvoice.TTSConfig{
 		MediaType: bdvoice.MediaMP3,

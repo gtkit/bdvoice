@@ -69,9 +69,12 @@ func (c *Client) CreateVoice(ctx context.Context, req *CreateVoiceRequest) (*Cre
 	}
 	defer httpResp.Body.Close()
 
-	respBody, err := io.ReadAll(httpResp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, maxResponseBodyBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("bdvoice: read response: %w", err)
+	}
+	if len(respBody) > maxResponseBodyBytes {
+		return nil, fmt.Errorf("bdvoice: create voice response exceeds %d bytes", maxResponseBodyBytes)
 	}
 
 	// HTTP 层面错误

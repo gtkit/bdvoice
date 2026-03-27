@@ -7,7 +7,10 @@
 // 鉴权方式支持 access_token（OAuth）和 API Key 两种模式。
 package bdvoice
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ============================================================================
 // 鉴权相关
@@ -40,12 +43,6 @@ func (t *tokenCache) valid() bool {
 		return false
 	}
 	return time.Until(t.ExpiresAt) > 5*time.Minute
-}
-
-// tokenErrorResponse 是 OAuth 请求失败时的错误响应。
-type tokenErrorResponse struct {
-	Error       string `json:"error"`
-	Description string `json:"error_description"`
 }
 
 // ============================================================================
@@ -143,7 +140,8 @@ const (
 )
 
 // TTSConfig 是 WebSocket TTS 合成的参数配置。
-// 所有字段均为可选，使用零值时 SDK 不会发送该参数，由服务端使用默认值。
+// 所有字段均为可选；直接赋值非零值时会发送，未设置的零值默认不发送，由服务端使用默认值。
+// 如需显式发送 0 值，使用对应的 Set 方法，如 SetPitch(0)。
 type TTSConfig struct {
 	// Lang 合成语种。不填默认为创建音色时选择的语种。
 	// 合成方言必须选 "zh"，合成日语必须选 "ja"。
@@ -166,6 +164,88 @@ type TTSConfig struct {
 
 	// Speed 语速，取值 0-15，默认 5。
 	Speed int `json:"speed,omitzero"`
+
+	hasSampleRate bool
+	hasPitch      bool
+	hasVolume     bool
+	hasSpeed      bool
+}
+
+// SetSampleRate 显式设置采样率，包括 0 值。
+func (c *TTSConfig) SetSampleRate(v int) *TTSConfig {
+	if c == nil {
+		return nil
+	}
+	c.SampleRate = v
+	c.hasSampleRate = true
+	return c
+}
+
+// SetPitch 显式设置音调，包括 0 值。
+func (c *TTSConfig) SetPitch(v int) *TTSConfig {
+	if c == nil {
+		return nil
+	}
+	c.Pitch = v
+	c.hasPitch = true
+	return c
+}
+
+// SetVolume 显式设置音量，包括 0 值。
+func (c *TTSConfig) SetVolume(v int) *TTSConfig {
+	if c == nil {
+		return nil
+	}
+	c.Volume = v
+	c.hasVolume = true
+	return c
+}
+
+// SetSpeed 显式设置语速，包括 0 值。
+func (c *TTSConfig) SetSpeed(v int) *TTSConfig {
+	if c == nil {
+		return nil
+	}
+	c.Speed = v
+	c.hasSpeed = true
+	return c
+}
+
+// MarshalJSON 为数值字段提供“显式零值”编码能力，同时保持现有字段兼容。
+func (c *TTSConfig) MarshalJSON() ([]byte, error) {
+	if c == nil {
+		return []byte("null"), nil
+	}
+
+	type wireTTSConfig struct {
+		Lang       string `json:"lang,omitzero"`
+		Dialect    string `json:"dialect,omitzero"`
+		MediaType  string `json:"media_type,omitzero"`
+		SampleRate *int   `json:"sample_rate,omitzero"`
+		Pitch      *int   `json:"pitch,omitzero"`
+		Volume     *int   `json:"volume,omitzero"`
+		Speed      *int   `json:"speed,omitzero"`
+	}
+
+	wire := wireTTSConfig{
+		Lang:      c.Lang,
+		Dialect:   c.Dialect,
+		MediaType: c.MediaType,
+	}
+	if c.hasSampleRate || c.SampleRate != 0 {
+		wire.SampleRate = &c.SampleRate
+	}
+	if c.hasPitch || c.Pitch != 0 {
+		wire.Pitch = &c.Pitch
+	}
+	if c.hasVolume || c.Volume != 0 {
+		wire.Volume = &c.Volume
+	}
+	if c.hasSpeed || c.Speed != 0 {
+		wire.Speed = &c.Speed
+	}
+
+	return json.Marshal(wire)
 }
 
 // wsStartFrame 是 WebSocket 初始化帧。
@@ -226,4 +306,7 @@ const (
 
 	// maxTextLength 是单次发送文本的最大字符数。
 	maxTextLength = 1000
+
+	// maxResponseBodyBytes 限制单次 HTTP 响应体读取大小，避免异常响应占满内存。
+	maxResponseBodyBytes = 1 << 20 // 1 MiB
 )

@@ -3,8 +3,10 @@ package bdvoice
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strconv"
 	"sync"
@@ -34,13 +36,19 @@ const (
 // TTSSession 不是并发安全的，不要在多个 goroutine 中同时操作同一个会话。
 // 如果需要并发合成，请创建多个会话。
 type TTSSession struct {
-	conn      *websocket.Conn
-	state     atomic.Int32  // sessionState
-	sessionID string        // 服务端返回的 session_id
-	audioCh   chan []byte   // 音频数据通道
-	errCh     chan error    // 错误通道
-	done      chan struct{} // 读取 goroutine 退出信号
-	closeOnce sync.Once     // 确保 Close 只执行一次
+	conn            *websocket.Conn
+	state           atomic.Int32  // sessionState
+	sessionID       string        // 服务端返回的 session_id
+	audioCh         chan []byte   // 音频数据通道
+	done            chan struct{} // 读取 goroutine 退出信号
+	closeCh         chan struct{} // Close 发出的停止信号
+	closeOnce       sync.Once     // 确保 Close 只执行一次
+	readLoopStarted atomic.Bool
+	readErr         atomic.Pointer[sessionError]
+}
+
+type sessionError struct {
+	err error
 }
 
 // NewTTSSession 创建一个新的 TTS 流式合成会话。
@@ -81,6 +89,11 @@ func (c *Client) NewTTSSession(ctx context.Context, voiceID int, cfg *TTSConfig)
 	dialer := websocket.Dialer{
 		HandshakeTimeout: c.httpClient.Timeout,
 	}
+	if transport, ok := c.httpClient.Transport.(*http.Transport); ok {
+		dialer.Proxy = transport.Proxy
+		dialer.NetDialContext = transport.DialContext
+		dialer.TLSClientConfig = transport.TLSClientConfig
+	}
 	conn, _, err := dialer.DialContext(ctx, wsURL, header)
 	if err != nil {
 		return nil, fmt.Errorf("bdvoice: websocket dial: %w", err)
@@ -89,8 +102,8 @@ func (c *Client) NewTTSSession(ctx context.Context, voiceID int, cfg *TTSConfig)
 	session := &TTSSession{
 		conn:    conn,
 		audioCh: make(chan []byte, 64), // 缓冲 64 帧，避免阻塞接收
-		errCh:   make(chan error, 1),
 		done:    make(chan struct{}),
+		closeCh: make(chan struct{}),
 	}
 
 	// 发送初始化帧
@@ -106,6 +119,7 @@ func (c *Client) NewTTSSession(ctx context.Context, voiceID int, cfg *TTSConfig)
 	}
 
 	// 启动后台接收 goroutine
+	session.readLoopStarted.Store(true)
 	go session.readLoop()
 
 	return session, nil
@@ -186,6 +200,9 @@ func (s *TTSSession) waitStarted() error {
 //   - 收到 system.error 帧
 //   - WebSocket 连接断开
 func (s *TTSSession) readLoop() {
+	s.readLoopStarted.Store(true)
+	// setReadError 发生在 return 之前；defer close(audioCh) 在 return 时执行。
+	// 读方一旦观察到 audioCh 已关闭，再读取 readErr 就能看到 return 前写入的错误。
 	defer close(s.done)
 	defer close(s.audioCh)
 
@@ -196,10 +213,7 @@ func (s *TTSSession) readLoop() {
 			if !websocket.IsCloseError(err,
 				websocket.CloseNormalClosure,
 				websocket.CloseGoingAway) {
-				select {
-				case s.errCh <- fmt.Errorf("bdvoice: ws read: %w", err):
-				default:
-				}
+				s.setReadError(fmt.Errorf("bdvoice: ws read: %w", err))
 			}
 			return
 		}
@@ -209,16 +223,17 @@ func (s *TTSSession) readLoop() {
 			// 音频数据
 			audioCopy := make([]byte, len(data))
 			copy(audioCopy, data)
-			s.audioCh <- audioCopy
+			select {
+			case s.audioCh <- audioCopy:
+			case <-s.closeCh:
+				return
+			}
 
 		case websocket.TextMessage:
 			// 控制帧
 			var resp wsResponse
 			if err := json.Unmarshal(data, &resp); err != nil {
-				select {
-				case s.errCh <- fmt.Errorf("bdvoice: decode ws message: %w", err):
-				default:
-				}
+				s.setReadError(fmt.Errorf("bdvoice: decode ws message: %w", err))
 				return
 			}
 
@@ -228,14 +243,11 @@ func (s *TTSSession) readLoop() {
 				return
 
 			case wsTypeSystemError:
-				select {
-				case s.errCh <- &WebSocketError{
+				s.setReadError(&WebSocketError{
 					Type:    resp.Type,
 					Code:    resp.Code,
 					Message: resp.Message,
-				}:
-				default:
-				}
+				})
 				return
 			}
 		}
@@ -250,6 +262,9 @@ func (s *TTSSession) readLoop() {
 // 返回 ErrSessionClosed 表示会话已关闭，
 // 返回 ErrSessionFinished 表示已调用 Finish，不能再发送文本。
 func (s *TTSSession) SendText(ctx context.Context, text string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := s.checkState(stateActive); err != nil {
 		return err
 	}
@@ -280,6 +295,9 @@ func (s *TTSSession) SendText(ctx context.Context, text string) error {
 //
 // Finish 后不能再调用 SendText，但可以继续通过 Read 读取音频。
 func (s *TTSSession) Finish(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := s.checkState(stateActive); err != nil {
 		return err
 	}
@@ -318,13 +336,10 @@ func (s *TTSSession) Finish(ctx context.Context) error {
 func (s *TTSSession) Read() ([]byte, error) {
 	data, ok := <-s.audioCh
 	if !ok {
-		// channel 已关闭，检查是否有错误
-		select {
-		case err := <-s.errCh:
+		if err := s.loadReadError(); err != nil {
 			return nil, err
-		default:
-			return nil, io.EOF
 		}
+		return nil, io.EOF
 	}
 	return data, nil
 }
@@ -353,13 +368,10 @@ func (s *TTSSession) Stream(ctx context.Context, handler func(audio []byte) erro
 
 		case data, ok := <-s.audioCh:
 			if !ok {
-				// channel 关闭，检查错误
-				select {
-				case err := <-s.errCh:
+				if err := s.loadReadError(); err != nil {
 					return err
-				default:
-					return nil // 正常结束
 				}
+				return nil // 正常结束
 			}
 			if err := handler(data); err != nil {
 				return fmt.Errorf("bdvoice: stream handler: %w", err)
@@ -382,22 +394,42 @@ func (s *TTSSession) Close() error {
 	var closeErr error
 	s.closeOnce.Do(func() {
 		s.state.Store(int32(stateClosed))
+		if s.closeCh != nil {
+			close(s.closeCh)
+		}
 
 		// 发送 WebSocket 关闭帧
-		closeErr = s.conn.WriteMessage(
-			websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
-		)
+		var writeErr error
+		if s.conn != nil {
+			writeErr = s.conn.WriteMessage(
+				websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+			)
 
-		// 关闭底层连接
-		if err := s.conn.Close(); err != nil && closeErr == nil {
-			closeErr = err
+			// 关闭底层连接
+			closeErr = errors.Join(writeErr, s.conn.Close())
 		}
 
 		// 等待 readLoop 退出，避免 goroutine 泄漏
-		<-s.done
+		if s.done != nil && s.readLoopStarted.Load() {
+			<-s.done
+		}
 	})
 	return closeErr
+}
+
+func (s *TTSSession) setReadError(err error) {
+	if err == nil {
+		return
+	}
+	s.readErr.CompareAndSwap(nil, &sessionError{err: err})
+}
+
+func (s *TTSSession) loadReadError() error {
+	if err := s.readErr.Load(); err != nil {
+		return err.err
+	}
+	return nil
 }
 
 // checkState 检查当前会话状态是否符合预期。
