@@ -113,7 +113,8 @@ func (c *Client) tokenRefreshContext(ctx context.Context) (context.Context, cont
 	if timeout <= 0 {
 		timeout = 30 * time.Second // 兜底
 	}
-	return refreshCtx, func() {}
+	// 与 http.Client.Timeout 对齐，并在 Timeout=0 时仍限制单次刷新时长，避免刷新协程悬挂。
+	return context.WithTimeout(refreshCtx, timeout)
 }
 
 // buildAuthQuery 构建带鉴权参数的 URL query string。

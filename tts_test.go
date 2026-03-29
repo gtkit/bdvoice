@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 )
@@ -737,5 +738,144 @@ func TestClientNewTTSSessionUsesHTTPClientTLSConfig(t *testing.T) {
 
 	if session.SessionID() != "tls-session" {
 		t.Fatalf("session id = %q, want %q", session.SessionID(), "tls-session")
+	}
+}
+
+// TestTTSSession_CloseImmediatelyAfterStart_NoDeadlock 回归：在 readLoop 已调度但可能尚未
+// 执行首行时立即 Close，不得永久阻塞（历史上 readLoopStarted 过早置位会导致 <-done 死锁）。
+func TestTTSSession_CloseImmediatelyAfterStart_NoDeadlock(t *testing.T) {
+	const iterations = 200
+	for range iterations {
+		server := mockWSServer(t, func(conn *websocket.Conn) {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+			_ = conn.WriteJSON(wsResponse{
+				Type:    wsTypeSystemStarted,
+				Code:    0,
+				Message: "ok",
+				Headers: map[string]string{"session_id": "race-test"},
+			})
+			// 阻塞读侧，使 readLoop 长时间停在 ReadMessage，直到连接被 Close。
+			select {}
+		})
+
+		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+		conn, _, err := websocket.DefaultDialer.DialContext(t.Context(), wsURL, nil)
+		if err != nil {
+			server.Close()
+			t.Fatalf("dial: %v", err)
+		}
+
+		session := &TTSSession{
+			conn:     conn,
+			audioCh:  make(chan []byte, 64),
+			done:     make(chan struct{}),
+			closeCh:  make(chan struct{}),
+			readIdle: minWSReadIdle,
+		}
+		if err := session.sendStart(nil); err != nil {
+			conn.Close()
+			server.Close()
+			t.Fatalf("sendStart: %v", err)
+		}
+		if err := session.startReadLoop(); err != nil {
+			conn.Close()
+			server.Close()
+			t.Fatalf("startReadLoop: %v", err)
+		}
+
+		done := make(chan struct{})
+		go func() {
+			_ = session.Close()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			server.Close()
+			t.Fatal("Close blocked — possible readLoop/done deadlock regression")
+		}
+		server.Close()
+	}
+}
+
+func TestTTSSession_ReadContext_Canceled(t *testing.T) {
+	server := mockWSServer(t, func(conn *websocket.Conn) {
+		conn.ReadMessage()
+		conn.WriteJSON(wsResponse{
+			Type:    wsTypeSystemStarted,
+			Code:    0,
+			Message: "ok",
+			Headers: map[string]string{"session_id": "rc"},
+		})
+		select {}
+	})
+	defer server.Close()
+
+	wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+	conn, _, err := websocket.DefaultDialer.DialContext(t.Context(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	session := &TTSSession{
+		conn:     conn,
+		audioCh:  make(chan []byte, 64),
+		done:     make(chan struct{}),
+		closeCh:  make(chan struct{}),
+		readIdle: minWSReadIdle,
+	}
+	if err := session.sendStart(nil); err != nil {
+		t.Fatalf("sendStart: %v", err)
+	}
+	if err := session.startReadLoop(); err != nil {
+		t.Fatalf("startReadLoop: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = session.ReadContext(ctx)
+	if err != context.Canceled {
+		t.Fatalf("ReadContext err = %v, want %v", err, context.Canceled)
+	}
+	_ = session.Close()
+}
+
+func TestTTSSession_ReadContext_NilContext(t *testing.T) {
+	s := &TTSSession{audioCh: make(chan []byte)}
+	_, err := s.ReadContext(nil)
+	if err == nil {
+		t.Fatal("expected error for nil context")
+	}
+}
+
+func TestTTSSession_SendText_RuneCount(t *testing.T) {
+	// 1001 个 ASCII 字符，应触发 ErrTextTooLong（与 utf8.RuneCountInString 一致）
+	var b strings.Builder
+	for range maxTextLength + 1 {
+		b.WriteByte('a')
+	}
+	text := b.String()
+	if utf8.RuneCountInString(text) != maxTextLength+1 {
+		t.Fatal("test setup: wrong rune count")
+	}
+	s := &TTSSession{audioCh: make(chan []byte)}
+	s.state.Store(int32(stateActive))
+	// 长度校验在 WriteJSON 之前，conn 可为 nil
+	err := s.SendText(t.Context(), text)
+	if err != ErrTextTooLong {
+		t.Fatalf("err = %v, want ErrTextTooLong", err)
+	}
+
+	// 1000 个拉丁字符 + 1 个中文 rune ⇒ 仍超过 1000 个 rune
+	const chinese = "中"
+	if utf8.RuneCountInString(strings.Repeat("a", maxTextLength)+chinese) != maxTextLength+1 {
+		t.Fatal("test setup: mixed string rune count")
+	}
+	err = s.SendText(t.Context(), strings.Repeat("a", maxTextLength)+chinese)
+	if err != ErrTextTooLong {
+		t.Fatalf("mixed: err = %v, want ErrTextTooLong", err)
 	}
 }

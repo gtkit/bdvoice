@@ -19,6 +19,10 @@ import (
 //
 // 注意：通过此接口创建的音色，若 1 年内没有调用合成记录，该音色将被自动删除。
 //
+// 约定：err == nil 时表示成功，此时 resp 非 nil 且 resp.Status == 0；
+// 任意失败（HTTP 错误、JSON 解析失败或业务 status != 0）时仅返回非 nil 的 error，
+// resp 为 nil，请用 errors.Is/IsAPIError 等判断错误类型，勿在未检查 err 时使用 resp。
+//
 // 使用示例：
 //
 //	resp, err := client.CreateVoice(ctx, &bdvoice.CreateVoiceRequest{
@@ -96,7 +100,7 @@ func (c *Client) CreateVoice(ctx context.Context, req *CreateVoiceRequest) (*Cre
 
 	// 业务层面错误（status != 0）
 	if resp.Status != 0 {
-		return &resp, &APIError{
+		return nil, &APIError{
 			StatusCode: httpResp.StatusCode,
 			Code:       resp.Status,
 			Message:    resp.Message,

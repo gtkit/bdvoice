@@ -381,7 +381,6 @@ func TestNewStreamTTSSession_E2E(t *testing.T) {
 		t.Fatalf("waitStarted: %v", err)
 	}
 
-	session.readLoopStarted.Store(true)
 	go session.readLoop()
 
 	ctx := t.Context()

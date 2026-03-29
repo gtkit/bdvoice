@@ -11,8 +11,16 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
+)
+
+const (
+	// WebSocket 单次 ReadMessage 允许的最大空闲等待时间（与 WithIdleTimeout 下限对齐后再夹紧）。
+	minWSReadIdle = 60 * time.Second
+	maxWSReadIdle = 600 * time.Second
 )
 
 // sessionState 表示 TTS 会话的状态机。
@@ -45,6 +53,8 @@ type TTSSession struct {
 	closeOnce       sync.Once     // 确保 Close 只执行一次
 	readLoopStarted atomic.Bool
 	readErr         atomic.Pointer[sessionError]
+	// readIdle 是每次 ReadMessage 前刷新的读超时，减轻半开连接无限阻塞；由 dialSession 根据 Client.idleTimeout 设置。
+	readIdle time.Duration
 }
 
 type sessionError struct {
@@ -124,11 +134,26 @@ func (c *Client) dialSession(ctx context.Context, wsURL string) (*TTSSession, er
 		return nil, fmt.Errorf("bdvoice: websocket dial: %w", err)
 	}
 
+	// 服务端 Ping 由 gorilla/websocket 默认回复 Pong；此处显式设置，便于与读超时策略一并维护。
+	conn.SetPingHandler(func(appData string) error {
+		deadline := time.Now().Add(10 * time.Second)
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), deadline)
+	})
+
+	readIdle := time.Duration(c.idleTimeout) * time.Second
+	if readIdle < minWSReadIdle {
+		readIdle = minWSReadIdle
+	}
+	if readIdle > maxWSReadIdle {
+		readIdle = maxWSReadIdle
+	}
+
 	return &TTSSession{
-		conn:    conn,
-		audioCh: make(chan []byte, 64), // 缓冲 64 帧，避免阻塞接收
-		done:    make(chan struct{}),
-		closeCh: make(chan struct{}),
+		conn:     conn,
+		audioCh:  make(chan []byte, 64), // 缓冲 64 帧，避免阻塞接收
+		done:     make(chan struct{}),
+		closeCh:  make(chan struct{}),
+		readIdle: readIdle,
 	}, nil
 }
 
@@ -137,7 +162,8 @@ func (s *TTSSession) startReadLoop() error {
 	if err := s.waitStarted(); err != nil {
 		return err
 	}
-	s.readLoopStarted.Store(true)
+	// readLoopStarted 仅在 readLoop 首行设置，避免在 go readLoop() 之后、
+	// readLoop 尚未执行时 Close 已看到 readLoopStarted=true 而永久阻塞在 <-done。
 	go s.readLoop()
 	return nil
 }
@@ -184,6 +210,7 @@ func (s *TTSSession) sendStart(cfg *TTSConfig) error {
 
 // waitStarted 阻塞等待 system.started 响应。
 func (s *TTSSession) waitStarted() error {
+	s.resetReadDeadline()
 	_, msg, err := s.conn.ReadMessage()
 	if err != nil {
 		return fmt.Errorf("read started response: %w", err)
@@ -224,6 +251,7 @@ func (s *TTSSession) readLoop() {
 	defer close(s.audioCh)
 
 	for {
+		s.resetReadDeadline()
 		msgType, data, err := s.conn.ReadMessage()
 		if err != nil {
 			// 连接关闭不视为错误（正常结束）
@@ -290,7 +318,7 @@ func (s *TTSSession) SendText(ctx context.Context, text string) error {
 	}
 
 	// 字符数校验（按 rune 计算，中文算一个字符）
-	if len([]rune(text)) > maxTextLength {
+	if utf8.RuneCountInString(text) > maxTextLength {
 		return ErrTextTooLong
 	}
 
@@ -336,6 +364,8 @@ func (s *TTSSession) Finish(ctx context.Context) error {
 // 这是「拉模式」接口，适合需要精细控制音频处理流程的场景，
 // 例如边接收边写入文件、边接收边转发给播放器等。
 //
+// 若需要在等待音频时响应取消，请使用 ReadContext。
+//
 // 返回值：
 //   - (data, nil): 成功读取一帧音频
 //   - (nil, io.EOF): 所有音频已读取完毕（合成结束）
@@ -362,6 +392,29 @@ func (s *TTSSession) Read() ([]byte, error) {
 		return nil, io.EOF
 	}
 	return data, nil
+}
+
+// ReadContext 与 Read 相同，但在等待音频帧时会响应 ctx 的取消。
+// ctx 不得为 nil。
+func (s *TTSSession) ReadContext(ctx context.Context) ([]byte, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("bdvoice: ReadContext: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case data, ok := <-s.audioCh:
+		if !ok {
+			if err := s.loadReadError(); err != nil {
+				return nil, err
+			}
+			return nil, io.EOF
+		}
+		return data, nil
+	}
 }
 
 // Stream 以回调方式持续读取音频数据，直到合成结束。
@@ -450,6 +503,14 @@ func (s *TTSSession) loadReadError() error {
 		return err.err
 	}
 	return nil
+}
+
+func (s *TTSSession) resetReadDeadline() {
+	d := s.readIdle
+	if d <= 0 {
+		d = minWSReadIdle
+	}
+	_ = s.conn.SetReadDeadline(time.Now().Add(d))
 }
 
 // checkState 检查当前会话状态是否符合预期。
