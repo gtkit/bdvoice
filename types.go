@@ -3,6 +3,7 @@
 // 支持两种核心能力：
 //   - 创建音色（REST API）：上传音频创建自定义音色
 //   - 流式语音合成（WebSocket TTS）：基于已创建音色进行实时语音合成
+//   - 流式文本在线合成（WebSocket TTS）：流式文本在线合成基于websocket协议，可以将输入的文本合成为二进制格式的语音数据
 //
 // 鉴权方式支持 access_token（OAuth）和 API Key 两种模式。
 package bdvoice
