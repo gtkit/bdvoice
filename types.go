@@ -301,8 +301,11 @@ const (
 	// createVoiceEndpoint 是创建音色的 API 路径。
 	createVoiceEndpoint = "/rest/2.0/speech/publiccloudspeech/v1/voice/clone/create"
 
-	// ttsWSEndpoint 是 WebSocket TTS 的路径。
+	// ttsWSEndpoint 是声音复刻 WebSocket TTS 的路径。
 	ttsWSEndpoint = "/ws/2.0/speech/publiccloudspeech/v1/voice/clone/tts"
+
+	// streamTTSWSEndpoint 是公有云流式文本在线合成的 WebSocket 路径。
+	streamTTSWSEndpoint = "/ws/2.0/speech/publiccloudspeech/v1/tts"
 
 	// maxTextLength 是单次发送文本的最大字符数。
 	maxTextLength = 1000
@@ -310,3 +313,142 @@ const (
 	// maxResponseBodyBytes 限制单次 HTTP 响应体读取大小，避免异常响应占满内存。
 	maxResponseBodyBytes = 1 << 20 // 1 MiB
 )
+
+// ============================================================================
+// 流式文本在线合成（公有云 TTS）
+// ============================================================================
+
+// AudioEncoding 定义公有云流式 TTS 的音频编码格式。
+type AudioEncoding int
+
+const (
+	// AudioEncodingMP3 MP3 格式，采样率 16k/24k。
+	AudioEncodingMP3 AudioEncoding = 3
+
+	// AudioEncodingPCM16K PCM 格式，采样率 16k/24k。
+	AudioEncodingPCM16K AudioEncoding = 4
+
+	// AudioEncodingPCM8K PCM 格式，采样率 8k。
+	AudioEncodingPCM8K AudioEncoding = 5
+
+	// AudioEncodingWAV WAV 格式，采样率 16k/24k。
+	AudioEncodingWAV AudioEncoding = 6
+)
+
+// StreamTTSConfig 是公有云流式文本在线合成的参数配置。
+//
+// 所有字段均为可选，未设置时由服务端使用默认值。
+// 数值字段默认值为 5（语速/音调/音量），若需要显式发送 0，请使用对应的 Set 方法。
+type StreamTTSConfig struct {
+	// Spd 语速，取值 0-15，默认为 5。
+	Spd int `json:"spd,omitzero"`
+
+	// Pit 音调，取值 0-15，默认为 5。
+	Pit int `json:"pit,omitzero"`
+
+	// Vol 音量，基础音库取值 0-9，其他音库取值 0-15，默认为 5。
+	Vol int `json:"vol,omitzero"`
+
+	// Aue 音频编码格式。
+	// 3=mp3(16k/24k), 4=pcm(16k/24k), 5=pcm(8k), 6=wav(16k/24k)，默认为 3。
+	Aue AudioEncoding `json:"aue,omitzero"`
+
+	// AudioCtrl 音频控制参数，仅支持将采样率降采为 16k。
+	// 格式：{"sampling_rate":16000}
+	// 不设置时由服务端根据 Aue 自动选择默认采样率。
+	AudioCtrl string `json:"audio_ctrl,omitzero"`
+
+	hasSpd bool
+	hasPit bool
+	hasVol bool
+	hasAue bool
+}
+
+// SetSpd 显式设置语速，包括 0 值。
+func (c *StreamTTSConfig) SetSpd(v int) *StreamTTSConfig {
+	if c == nil {
+		return nil
+	}
+	c.Spd = v
+	c.hasSpd = true
+	return c
+}
+
+// SetPit 显式设置音调，包括 0 值。
+func (c *StreamTTSConfig) SetPit(v int) *StreamTTSConfig {
+	if c == nil {
+		return nil
+	}
+	c.Pit = v
+	c.hasPit = true
+	return c
+}
+
+// SetVol 显式设置音量，包括 0 值。
+func (c *StreamTTSConfig) SetVol(v int) *StreamTTSConfig {
+	if c == nil {
+		return nil
+	}
+	c.Vol = v
+	c.hasVol = true
+	return c
+}
+
+// SetAue 显式设置音频编码格式，包括零值。
+func (c *StreamTTSConfig) SetAue(v AudioEncoding) *StreamTTSConfig {
+	if c == nil {
+		return nil
+	}
+	c.Aue = v
+	c.hasAue = true
+	return c
+}
+
+// WithSampleRate16K 设置降采样到 16kHz。
+// 这是 audio_ctrl 参数的便捷方法。
+func (c *StreamTTSConfig) WithSampleRate16K() *StreamTTSConfig {
+	if c == nil {
+		return nil
+	}
+	c.AudioCtrl = `{"sampling_rate":16000}`
+	return c
+}
+
+// MarshalJSON 为数值字段提供"显式零值"编码能力。
+func (c *StreamTTSConfig) MarshalJSON() ([]byte, error) {
+	if c == nil {
+		return []byte("null"), nil
+	}
+
+	type wireStreamTTSConfig struct {
+		Spd       *int           `json:"spd,omitzero"`
+		Pit       *int           `json:"pit,omitzero"`
+		Vol       *int           `json:"vol,omitzero"`
+		Aue       *AudioEncoding `json:"aue,omitzero"`
+		AudioCtrl string         `json:"audio_ctrl,omitzero"`
+	}
+
+	wire := wireStreamTTSConfig{
+		AudioCtrl: c.AudioCtrl,
+	}
+	if c.hasSpd || c.Spd != 0 {
+		wire.Spd = &c.Spd
+	}
+	if c.hasPit || c.Pit != 0 {
+		wire.Pit = &c.Pit
+	}
+	if c.hasVol || c.Vol != 0 {
+		wire.Vol = &c.Vol
+	}
+	if c.hasAue || c.Aue != 0 {
+		wire.Aue = &c.Aue
+	}
+
+	return json.Marshal(wire)
+}
+
+// streamTTSStartFrame 是公有云流式 TTS 的初始化帧。
+type streamTTSStartFrame struct {
+	Type    string           `json:"type"`
+	Payload *StreamTTSConfig `json:"payload,omitzero"`
+}

@@ -3,12 +3,14 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/gtkit/bdvoice.svg)](https://pkg.go.dev/github.com/gtkit/bdvoice)
 [![Go Report Card](https://goreportcard.com/badge/github.com/gtkit/bdvoice)](https://goreportcard.com/report/github.com/gtkit/bdvoice)
 
-百度智能云**大模型声音复刻** Go SDK，提供音色创建和 WebSocket 流式语音合成能力。
+百度智能云语音合成 Go SDK，提供音色创建、声音复刻 TTS 和公有云流式文本在线合成能力。
 
 ## 功能特性
 
 - **音色创建**：通过音频 URL 或 base64 编码创建自定义音色
-- **流式 TTS 合成**：基于 WebSocket 的实时语音合成，支持拉模式（Read）和推模式（Stream）
+- **声音复刻 TTS**：基于已创建音色的 WebSocket 实时语音合成
+- **流式文本在线合成（新）**：公有云预置发音人的 WebSocket 实时语音合成，支持"边合成边播放"
+- **统一会话接口**：两种 TTS 模式共享相同的 TTSSession（Read/Stream/Close），零学习成本
 - **双鉴权模式**：支持 OAuth access_token 和 API Key 两种鉴权方式
 - **自动 Token 管理**：singleflight 防并发刷新 + atomic 无锁缓存读取
 - **多语种/方言**：中英语、日语、河南话、上海话、四川话、湖南话、贵州话
@@ -72,7 +74,7 @@ bdvoice/
 │                      # - CreateVoice(): 参数校验 → 鉴权 → 序列化 → HTTP POST → 解析响应
 │                      # - 支持 audio_url 和 audio_file 两种上传方式
 │
-├── tts.go             # WebSocket 流式 TTS 合成（核心）
+├── tts.go             # WebSocket 流式 TTS 合成（声音复刻）
 │                      # - NewTTSSession(): 建连 → system.start → 等待 started → 启动 readLoop
 │                      # - SendText(): 发送文本帧（≤1000字/次，可多次调用）
 │                      # - Finish(): 发送 system.finish 通知服务端
@@ -81,10 +83,18 @@ bdvoice/
 │                      # - Close(): 幂等关闭，sync.Once 保证安全
 │                      # - readLoop(): 后台 goroutine，区分二进制(音频)/文本(控制帧)
 │
+├── stream_tts.go      # 公有云流式文本在线合成（新功能）
+│                      # - NewStreamTTSSession(): 使用预置发音人的流式 TTS
+│                      # - buildStreamTTSWSURL(): 构建 /v1/tts endpoint URL（含 per 参数）
+│                      # - sendStreamTTSStart(): 发送 StreamTTSConfig 初始化帧
+│                      # - 复用 TTSSession 的 SendText/Finish/Read/Stream/Close
+│
 ├── types.go           # 所有类型定义和常量
 │                      # - AuthMode: 鉴权方式枚举
 │                      # - CreateVoiceRequest/Response: 创建音色请求/响应
-│                      # - TTSConfig: TTS 合成参数（语种/方言/格式/音调/音量/语速）
+│                      # - TTSConfig: 声音复刻 TTS 参数（语种/方言/格式/音调/音量/语速）
+│                      # - StreamTTSConfig: 公有云流式 TTS 参数（spd/pit/vol/aue/audio_ctrl）
+│                      # - AudioEncoding: 音频编码格式常量（MP3/PCM16K/PCM8K/WAV）
 │                      # - Lang*/Dialect*/Media*: 语种/方言/格式常量
 │                      # - WebSocket 帧类型定义（start/text/finish/response）
 │                      # - tokenCache: token 缓存结构（含 5 分钟过期缓冲）
@@ -453,6 +463,122 @@ func synthesizeDialect(client *bdvoice.Client, voiceID int) {
 }
 ```
 
+### 6. 流式文本在线合成（公有云预置发音人）
+
+与上述声音复刻 TTS（`NewTTSSession`）不同，公有云流式文本在线合成（`NewStreamTTSSession`）使用百度预置的发音人，无需先创建音色。适合不需要自定义音色、快速集成 TTS 能力的场景。
+
+**两种 TTS 模式对比**：
+
+| 特性 | 声音复刻 TTS (`NewTTSSession`) | 流式文本在线合成 (`NewStreamTTSSession`) |
+|------|------|------|
+| 发音人 | 自定义复刻音色 (`voice_id`) | 百度预置发音人 (`per`) |
+| 前置步骤 | 需先调用 `CreateVoice` | 无，直接使用 |
+| 音频格式参数 | `MediaType` (字符串) | `Aue` (数字编码) |
+| 采样率控制 | `SampleRate` (整数) | `AudioCtrl` (JSON 字符串) |
+| 方言支持 | 通过 `Dialect` 字段 | 通过不同 `per` 值 |
+| 会话操作 | SendText/Finish/Read/Stream/Close | **完全相同** |
+
+```go
+import (
+    "context"
+    "fmt"
+    "io"
+    "log"
+    "os"
+
+    "github.com/gtkit/bdvoice"
+)
+
+func streamTTS(client *bdvoice.Client) {
+    ctx := context.Background()
+
+    // per 是百度预置发音人标识
+    // 常用发音人示例：
+    //   "0" — 度小美（女声）
+    //   "1" — 度小宇（男声）
+    //   "3" — 度逍遥（男声，情感合成）
+    //   "4" — 度丫丫（女声，童声）
+    //   具体发音人列表请参考百度语音合成文档
+    session, err := client.NewStreamTTSSession(ctx, "0", &bdvoice.StreamTTSConfig{
+        Spd: 5,                        // 语速 0-15，默认 5
+        Pit: 5,                        // 音调 0-15，默认 5
+        Vol: 5,                        // 音量 0-15（基础音库 0-9），默认 5
+        Aue: bdvoice.AudioEncodingMP3, // 音频格式：3=mp3, 4=pcm-16k, 5=pcm-8k, 6=wav
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer session.Close()
+
+    // 发送文本（与 NewTTSSession 完全相同的 API）
+    // 注意：文本中加上标点有助于服务端及时切句合成，
+    // 若无标点，服务端会等待至少 60 字或 5~6 秒超时后才合成
+    if err := session.SendText(ctx, "你好，欢迎使用百度流式语音合成服务。"); err != nil {
+        log.Fatal(err)
+    }
+    if err := session.SendText(ctx, "支持多音字标注，如：重(chong2)报集团。"); err != nil {
+        log.Fatal(err)
+    }
+
+    // 通知服务端所有文本已发送（必须调用，否则可能丢失缓冲文本）
+    if err := session.Finish(ctx); err != nil {
+        log.Fatal(err)
+    }
+
+    // 拉模式读取音频（与 NewTTSSession 完全一致）
+    f, _ := os.Create("stream_output.mp3")
+    defer f.Close()
+
+    for {
+        data, err := session.Read()
+        if err == io.EOF {
+            break
+        }
+        if err != nil {
+            log.Fatal(err)
+        }
+        f.Write(data)
+    }
+
+    fmt.Println("流式文本在线合成完成")
+}
+
+// 使用降采样和推模式的高级示例
+func streamTTSAdvanced(client *bdvoice.Client) {
+    ctx := context.Background()
+
+    // 链式配置：设置音频格式 + 降采样到 16kHz
+    cfg := (&bdvoice.StreamTTSConfig{
+        Aue: bdvoice.AudioEncodingMP3,
+        Spd: 7, // 稍快语速
+    }).WithSampleRate16K() // 便捷方法：设置 audio_ctrl 降采样到 16k
+
+    // 如果需要显式发送 0 值，使用 setter：
+    // cfg := (&bdvoice.StreamTTSConfig{}).SetSpd(0).SetPit(0).SetVol(0)
+
+    session, err := client.NewStreamTTSSession(ctx, "4103", cfg)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer session.Close()
+
+    _ = session.SendText(ctx, "这是使用推模式的高级示例。")
+    _ = session.Finish(ctx)
+
+    // 推模式（同样与 NewTTSSession 完全一致）
+    f, _ := os.Create("stream_advanced.mp3")
+    defer f.Close()
+
+    err = session.Stream(ctx, func(audio []byte) error {
+        _, err := f.Write(audio)
+        return err
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
 ## 错误处理
 
 SDK 提供了完整的错误类型体系，支持精细化错误处理：
@@ -511,13 +637,26 @@ errors.Is(err, bdvoice.ErrNoAuth)           // 未配置鉴权方式
 - **迁移**：输入语种/方言 ≠ 合成语种/方言（如普通话→河南话）
 - 建议：音色创建和语音合成时使用一致的 `lang` 参数
 
-### WebSocket TTS
+### WebSocket TTS（通用）
 - 单次 `SendText` 不能超过 1000 个字符
 - 可以多次调用 `SendText` 发送长文本
-- 发送频率过快时服务端会返回 `216429` 错误
-- `idle_timeout` 范围 [5, 600] 秒，默认 60 秒
 - `TTSSession` **不是并发安全的**，不要在多个 goroutine 中操作同一个 session
 - 需要并发合成时，创建多个独立的 session
+
+### 声音复刻 TTS（`NewTTSSession`）
+- 发送频率过快时服务端会返回 `216429` 错误
+- `idle_timeout` 范围 [5, 600] 秒，默认 60 秒
+
+### 流式文本在线合成（`NewStreamTTSSession`）
+- 建议文本不超过 2000 GBK 字节（约 1000 个汉字或字母数字）
+- 输入文本必须采用 UTF-8 编码
+- 文本中**加上标点**有助于服务端及时切句合成；若无标点，服务端会等待至少 60 字或 5~6 秒超时后才合成
+- 有效的隔断标点：`, . 、? ! : ; ， 。 ？ ！ ： ； — …`
+- 客户端超过 **1 分钟**不发送消息，服务端会主动断开连接
+- 发送完所有文本后**必须调用 `Finish()`**，否则服务端缓冲的文本可能丢失
+- 支持多音字标注，格式如：`重(chong2)报集团`
+- `Aue` 音频格式：`AudioEncodingMP3`(3)=mp3, `AudioEncodingPCM16K`(4)=pcm-16k, `AudioEncodingPCM8K`(5)=pcm-8k, `AudioEncodingWAV`(6)=wav
+- 降采样到 16kHz 使用 `WithSampleRate16K()` 便捷方法
 
 ### Read vs Stream 选择指南
 

@@ -157,3 +157,99 @@ func ExampleTTSSession_Stream() {
 
 	fmt.Println("方言音频合成完成")
 }
+
+// ExampleClient_NewStreamTTSSession_read 演示使用公有云流式文本在线合成（拉模式）。
+// 与 NewTTSSession 不同，此方法使用预置发音人而非自定义复刻音色。
+func ExampleClient_NewStreamTTSSession_read() {
+	client, err := bdvoice.New(
+		bdvoice.WithClientCredentials("your-client-id", "your-client-secret"),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	// per 是发音人标识，如 "0"=度小美, "1"=度小宇 等
+	session, err := client.NewStreamTTSSession(ctx, "0", &bdvoice.StreamTTSConfig{
+		Spd: 5,                        // 语速 0-15，默认 5
+		Pit: 5,                        // 音调 0-15，默认 5
+		Vol: 5,                        // 音量 0-15，默认 5
+		Aue: bdvoice.AudioEncodingMP3, // 音频格式：3=mp3, 4=pcm-16k, 5=pcm-8k, 6=wav
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer session.Close()
+
+	// 发送文本（可多次调用，每次≤1000字符）
+	// 注意：文本中加上标点有助于服务端及时切句合成
+	if err := session.SendText(ctx, "你好，欢迎使用百度流式语音合成。"); err != nil {
+		log.Fatal(err)
+	}
+	if err := session.SendText(ctx, "这是第二段文本，支持边合成边播放。"); err != nil {
+		log.Fatal(err)
+	}
+
+	// 通知服务端所有文本已发送完毕
+	if err := session.Finish(ctx); err != nil {
+		log.Fatal(err)
+	}
+
+	// 拉模式读取音频
+	f, _ := os.Create("stream_output.mp3")
+	defer f.Close()
+
+	for {
+		data, err := session.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Fatal(err)
+		}
+		f.Write(data)
+	}
+
+	fmt.Println("流式文本在线合成完成")
+}
+
+// ExampleClient_NewStreamTTSSession_stream 演示使用公有云流式文本在线合成（推模式）。
+func ExampleClient_NewStreamTTSSession_stream() {
+	client, err := bdvoice.New(
+		bdvoice.WithAPIKey("your-api-key"),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	// 使用降采样到 16kHz 的配置
+	cfg := (&bdvoice.StreamTTSConfig{
+		Aue: bdvoice.AudioEncodingMP3,
+		Spd: 7, // 稍快语速
+	}).WithSampleRate16K() // 降采样到 16kHz
+
+	session, err := client.NewStreamTTSSession(ctx, "4103", cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer session.Close()
+
+	_ = session.SendText(ctx, "支持多音字标注，如：重(chong2)报集团。")
+	_ = session.Finish(ctx)
+
+	f, _ := os.Create("stream_output_16k.mp3")
+	defer f.Close()
+
+	err = session.Stream(ctx, func(audio []byte) error {
+		_, err := f.Write(audio)
+		return err
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("流式合成完成（16kHz采样率）")
+}
