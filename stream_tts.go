@@ -3,10 +3,7 @@ package bdvoice
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"net/url"
-
-	"github.com/gorilla/websocket"
 )
 
 // NewStreamTTSSession 创建一个公有云流式文本在线合成会话。
@@ -67,48 +64,23 @@ func (c *Client) NewStreamTTSSession(ctx context.Context, per string, cfg *Strea
 		return nil, fmt.Errorf("bdvoice: build stream tts ws url: %w", err)
 	}
 
-	// 构建连接 header（API Key 模式需要 Authorization）
-	header := make(http.Header)
-	if c.authMode == AuthAPIKey {
-		header.Set("Authorization", c.apiKey)
-	}
-
-	// 建立 WebSocket 连接
-	dialer := websocket.Dialer{
-		HandshakeTimeout: c.httpClient.Timeout,
-	}
-	if transport, ok := c.httpClient.Transport.(*http.Transport); ok {
-		dialer.Proxy = transport.Proxy
-		dialer.NetDialContext = transport.DialContext
-		dialer.TLSClientConfig = transport.TLSClientConfig
-	}
-	conn, _, err := dialer.DialContext(ctx, wsURL, header)
+	// 建立连接并创建 session
+	session, err := c.dialSession(ctx, wsURL)
 	if err != nil {
-		return nil, fmt.Errorf("bdvoice: stream tts websocket dial: %w", err)
-	}
-
-	session := &TTSSession{
-		conn:    conn,
-		audioCh: make(chan []byte, 64), // 缓冲 64 帧，避免阻塞接收
-		done:    make(chan struct{}),
-		closeCh: make(chan struct{}),
+		return nil, err
 	}
 
 	// 发送 system.start 初始化帧
 	if err := session.sendStreamTTSStart(cfg); err != nil {
-		conn.Close()
+		session.conn.Close()
 		return nil, fmt.Errorf("bdvoice: send stream tts start frame: %w", err)
 	}
 
-	// 等待 system.started 确认
-	if err := session.waitStarted(); err != nil {
-		conn.Close()
+	// 等待初始化确认并启动 readLoop
+	if err := session.startReadLoop(); err != nil {
+		session.conn.Close()
 		return nil, fmt.Errorf("bdvoice: stream tts wait started: %w", err)
 	}
-
-	// 启动后台接收 goroutine
-	session.readLoopStarted.Store(true)
-	go session.readLoop()
 
 	return session, nil
 }

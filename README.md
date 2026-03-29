@@ -186,37 +186,37 @@ bdvoice/
 package main
 
 import (
-    "log"
-    "net/http"
-    "time"
+	"log"
+	"net/http"
+	"time"
 
-    "github.com/gtkit/bdvoice"
+	"github.com/gtkit/bdvoice"
 )
 
 func main() {
-    // 方式一（推荐）：使用 client_id + client_secret
-    // SDK 自动获取和续期 access_token，无需手动管理
-    client, err := bdvoice.New(
-        bdvoice.WithClientCredentials(
-            "your-client-id",     // 百度 AI 应用的 API Key
-            "your-client-secret", // 百度 AI 应用的 Secret Key
-        ),
-        // 以下为可选配置：
-        bdvoice.WithHTTPClient(&http.Client{
-            Timeout: 30 * time.Second, // 自定义 HTTP 超时
-        }),
-        bdvoice.WithIdleTimeout(120), // WebSocket 空闲超时 120 秒
-    )
-    if err != nil {
-        log.Fatal(err)
-    }
+	// 方式一（推荐）：使用 client_id + client_secret
+	// SDK 自动获取和续期 access_token，无需手动管理
+	client, err := bdvoice.New(
+		bdvoice.WithClientCredentials(
+			"your-client-id",     // 百度 AI 应用的 API Key
+			"your-client-secret", // 百度 AI 应用的 Secret Key
+		),
+		// 以下为可选配置：
+		bdvoice.WithHTTPClient(&http.Client{
+			Timeout: 30 * time.Second, // 自定义 HTTP 超时
+		}),
+		bdvoice.WithIdleTimeout(120), // WebSocket 空闲超时 120 秒
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
 
-    // 方式二：使用 API Key（适合快速测试）
-    // client, err := bdvoice.New(
-    //     bdvoice.WithAPIKey("your-api-key"),
-    // )
+	// 方式二：使用 API Key（适合快速测试）
+	// client, err := bdvoice.New(
+	//     bdvoice.WithAPIKey("your-api-key"),
+	// )
 
-    _ = client
+	_ = client
 }
 ```
 
@@ -224,48 +224,48 @@ func main() {
 
 ```go
 import (
-    "context"
-    "fmt"
-    "log"
+"context"
+"fmt"
+"log"
 
-    "github.com/gtkit/bdvoice"
+"github.com/gtkit/bdvoice"
 )
 
 func createVoice(client *bdvoice.Client) {
-    ctx := context.Background()
+ctx := context.Background()
 
-    // ---- 方式一：通过音频 URL 创建 ----
-    resp, err := client.CreateVoice(ctx, &bdvoice.CreateVoiceRequest{
-        VoiceName: "my-voice",             // 必填：音色名称，同一用户下不可重复
-        VoiceDesc: "温柔细腻的女声",          // 可选：音色描述
-        AudioURL:  "https://example.com/audio.wav", // 音频链接，5M 以内，5~20 秒
-        Lang:      bdvoice.LangChinese, // 可选：语种，默认 "zh"
-    })
+// ---- 方式一：通过音频 URL 创建 ----
+resp, err := client.CreateVoice(ctx, &bdvoice.CreateVoiceRequest{
+VoiceName: "my-voice",             // 必填：音色名称，同一用户下不可重复
+VoiceDesc: "温柔细腻的女声",          // 可选：音色描述
+AudioURL:  "https://example.com/audio.wav", // 音频链接，5M 以内，5~20 秒
+Lang:      bdvoice.LangChinese, // 可选：语种，默认 "zh"
+})
 
-    // ---- 方式二：通过 base64 编码创建 ----
-    // resp, err := client.CreateVoice(ctx, &bdvoice.CreateVoiceRequest{
-    //     VoiceName: "my-voice",
-    //     AudioFile: base64EncodedAudio, // 音频 base64 编码
-    //     Lang:      bdvoice.LangJapanese, // 日语音色建议 10~30 秒日语音频
-    // })
+// ---- 方式二：通过 base64 编码创建 ----
+// resp, err := client.CreateVoice(ctx, &bdvoice.CreateVoiceRequest{
+//     VoiceName: "my-voice",
+//     AudioFile: base64EncodedAudio, // 音频 base64 编码
+//     Lang:      bdvoice.LangJapanese, // 日语音色建议 10~30 秒日语音频
+// })
 
-    if err != nil {
-        // 精细化错误处理
-        if apiErr, ok := bdvoice.IsAPIError(err); ok {
-            // API 业务错误，如音色名重复、参数无效等
-            fmt.Printf("API 错误: code=%d, message=%s\n", apiErr.Code, apiErr.Message)
-        } else if oauthErr, ok := bdvoice.IsOAuthError(err); ok {
-            // 鉴权失败，如 client_id/secret 错误
-            fmt.Printf("鉴权错误: %s - %s\n", oauthErr.ErrorCode, oauthErr.Description)
-        } else if valErr, ok := bdvoice.IsValidationError(err); ok {
-            // 参数校验失败（客户端侧）
-            fmt.Printf("参数错误: 字段 %s - %s\n", valErr.Field, valErr.Reason)
-        }
-        log.Fatal(err)
-    }
+if err != nil {
+// 精细化错误处理
+if apiErr, ok := bdvoice.IsAPIError(err); ok {
+// API 业务错误，如音色名重复、参数无效等
+fmt.Printf("API 错误: code=%d, message=%s\n", apiErr.Code, apiErr.Message)
+} else if oauthErr, ok := bdvoice.IsOAuthError(err); ok {
+// 鉴权失败，如 client_id/secret 错误
+fmt.Printf("鉴权错误: %s - %s\n", oauthErr.ErrorCode, oauthErr.Description)
+} else if valErr, ok := bdvoice.IsValidationError(err); ok {
+// 参数校验失败（客户端侧）
+fmt.Printf("参数错误: 字段 %s - %s\n", valErr.Field, valErr.Reason)
+}
+log.Fatal(err)
+}
 
-    fmt.Printf("音色创建成功！voice_id: %d\n", resp.Data.VoiceID)
-    // 保存 voice_id，后续 TTS 合成时使用
+fmt.Printf("音色创建成功！voice_id: %d\n", resp.Data.VoiceID)
+// 保存 voice_id，后续 TTS 合成时使用
 }
 ```
 
@@ -275,83 +275,83 @@ func createVoice(client *bdvoice.Client) {
 
 ```go
 import (
-    "context"
-    "fmt"
-    "io"
-    "log"
-    "os"
+"context"
+"fmt"
+"io"
+"log"
+"os"
 
-    "github.com/gtkit/bdvoice"
+"github.com/gtkit/bdvoice"
 )
 
 func synthesizeWithRead(client *bdvoice.Client, voiceID int) {
-    ctx := context.Background()
+ctx := context.Background()
 
-    // 步骤 1：创建 TTS 会话
-    // 此步骤会自动完成 WebSocket 连接建立和初始化握手
-    session, err := client.NewTTSSession(ctx, voiceID, &bdvoice.TTSConfig{
-        MediaType: bdvoice.MediaMP3,     // 输出 MP3 格式
-        Speed:     7,                        // 语速稍快（0-15，默认5）
-        Pitch:     5,                        // 音调（0-15，默认5）
-        Volume:    8,                        // 音量稍大（0-15，默认5）
-        Lang:      bdvoice.LangChinese,  // 中英语
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer session.Close() // 确保连接释放
+// 步骤 1：创建 TTS 会话
+// 此步骤会自动完成 WebSocket 连接建立和初始化握手
+session, err := client.NewTTSSession(ctx, voiceID, &bdvoice.TTSConfig{
+MediaType: bdvoice.MediaMP3,     // 输出 MP3 格式
+Speed:     7,                        // 语速稍快（0-15，默认5）
+Pitch:     5,                        // 音调（0-15，默认5）
+Volume:    8,                        // 音量稍大（0-15，默认5）
+Lang:      bdvoice.LangChinese,  // 中英语
+})
+if err != nil {
+log.Fatal(err)
+}
+defer session.Close() // 确保连接释放
 
-    // 如果需要显式发送 0 值（例如最低音调/最慢语速），使用 setter：
-    // cfg := (&bdvoice.TTSConfig{MediaType: bdvoice.MediaMP3}).SetPitch(0).SetSpeed(0)
+// 如果需要显式发送 0 值（例如最低音调/最慢语速），使用 setter：
+// cfg := (&bdvoice.TTSConfig{MediaType: bdvoice.MediaMP3}).SetPitch(0).SetSpeed(0)
 
-    // 可选：打印 session_id，用于问题排查
-    fmt.Printf("Session ID: %s\n", session.SessionID())
+// 可选：打印 session_id，用于问题排查
+fmt.Printf("Session ID: %s\n", session.SessionID())
 
-    // 步骤 2：发送待合成的文本
-    // 可以多次调用 SendText，每次不超过 1000 字符
-    texts := []string{
-        "大家好，欢迎收听今天的节目。",
-        "今天我们来聊一聊人工智能技术的最新发展。",
-        "首先，让我们回顾一下过去一年的重要进展。",
-    }
-    for _, text := range texts {
-        if err := session.SendText(ctx, text); err != nil {
-            log.Fatal(err)
-        }
-    }
+// 步骤 2：发送待合成的文本
+// 可以多次调用 SendText，每次不超过 1000 字符
+texts := []string{
+"大家好，欢迎收听今天的节目。",
+"今天我们来聊一聊人工智能技术的最新发展。",
+"首先，让我们回顾一下过去一年的重要进展。",
+}
+for _, text := range texts {
+if err := session.SendText(ctx, text); err != nil {
+log.Fatal(err)
+}
+}
 
-    // 步骤 3：通知服务端所有文本已发送
-    // Finish 后不能再调用 SendText，但可以继续 Read
-    if err := session.Finish(ctx); err != nil {
-        log.Fatal(err)
-    }
+// 步骤 3：通知服务端所有文本已发送
+// Finish 后不能再调用 SendText，但可以继续 Read
+if err := session.Finish(ctx); err != nil {
+log.Fatal(err)
+}
 
-    // 步骤 4：拉模式逐帧读取音频
-    f, err := os.Create("output.mp3")
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer f.Close()
+// 步骤 4：拉模式逐帧读取音频
+f, err := os.Create("output.mp3")
+if err != nil {
+log.Fatal(err)
+}
+defer f.Close()
 
-    var totalBytes int
-    for {
-        data, err := session.Read()
-        if err == io.EOF {
-            break // 所有音频已接收完毕
-        }
-        if err != nil {
-            // 可能是服务端错误或连接断开
-            if wsErr, ok := bdvoice.IsWebSocketError(err); ok {
-                log.Printf("服务端错误: code=%d, msg=%s", wsErr.Code, wsErr.Message)
-            }
-            log.Fatal(err)
-        }
+var totalBytes int
+for {
+data, err := session.Read()
+if err == io.EOF {
+break // 所有音频已接收完毕
+}
+if err != nil {
+// 可能是服务端错误或连接断开
+if wsErr, ok := bdvoice.IsWebSocketError(err); ok {
+log.Printf("服务端错误: code=%d, msg=%s", wsErr.Code, wsErr.Message)
+}
+log.Fatal(err)
+}
 
-        n, _ := f.Write(data)
-        totalBytes += n
-    }
+n, _ := f.Write(data)
+totalBytes += n
+}
 
-    fmt.Printf("合成完成，共接收 %d 字节音频数据\n", totalBytes)
+fmt.Printf("合成完成，共接收 %d 字节音频数据\n", totalBytes)
 }
 ```
 
@@ -361,75 +361,75 @@ func synthesizeWithRead(client *bdvoice.Client, voiceID int) {
 
 ```go
 import (
-    "context"
-    "log"
-    "net/http"
-    "os"
+"context"
+"log"
+"net/http"
+"os"
 
-    "github.com/gtkit/bdvoice"
+"github.com/gtkit/bdvoice"
 )
 
 // 示例 1：直接写入文件
 func synthesizeToFile(client *bdvoice.Client, voiceID int) {
-    ctx := context.Background()
+ctx := context.Background()
 
-    session, err := client.NewTTSSession(ctx, voiceID, &bdvoice.TTSConfig{
-        MediaType: bdvoice.MediaMP3,
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer session.Close()
+session, err := client.NewTTSSession(ctx, voiceID, &bdvoice.TTSConfig{
+MediaType: bdvoice.MediaMP3,
+})
+if err != nil {
+log.Fatal(err)
+}
+defer session.Close()
 
-    _ = session.SendText(ctx, "这是一段推模式的语音合成测试。")
-    _ = session.Finish(ctx)
+_ = session.SendText(ctx, "这是一段推模式的语音合成测试。")
+_ = session.Finish(ctx)
 
-    f, _ := os.Create("output_stream.mp3")
-    defer f.Close()
+f, _ := os.Create("output_stream.mp3")
+defer f.Close()
 
-    // Stream 会持续接收音频直到合成结束
-    // handler 返回 error 会中止接收
-    err = session.Stream(ctx, func(audio []byte) error {
-        _, err := f.Write(audio)
-        return err
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
+// Stream 会持续接收音频直到合成结束
+// handler 返回 error 会中止接收
+err = session.Stream(ctx, func(audio []byte) error {
+_, err := f.Write(audio)
+return err
+})
+if err != nil {
+log.Fatal(err)
+}
 }
 
 // 示例 2：HTTP 流式响应（实时播放）
 func handleTTS(w http.ResponseWriter, r *http.Request, client *bdvoice.Client, voiceID int) {
-    ctx := r.Context()
+ctx := r.Context()
 
-    session, err := client.NewTTSSession(ctx, voiceID, &bdvoice.TTSConfig{
-        MediaType: bdvoice.MediaMP3,
-    })
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-    }
-    defer session.Close()
+session, err := client.NewTTSSession(ctx, voiceID, &bdvoice.TTSConfig{
+MediaType: bdvoice.MediaMP3,
+})
+if err != nil {
+http.Error(w, err.Error(), http.StatusInternalServerError)
+return
+}
+defer session.Close()
 
-    text := r.URL.Query().Get("text")
-    _ = session.SendText(ctx, text)
-    _ = session.Finish(ctx)
+text := r.URL.Query().Get("text")
+_ = session.SendText(ctx, text)
+_ = session.Finish(ctx)
 
-    // 设置流式响应头
-    w.Header().Set("Content-Type", "audio/mpeg")
-    w.Header().Set("Transfer-Encoding", "chunked")
+// 设置流式响应头
+w.Header().Set("Content-Type", "audio/mpeg")
+w.Header().Set("Transfer-Encoding", "chunked")
 
-    // 推模式直接写入 HTTP response
-    // 客户端断开连接时 ctx 会取消，Stream 自动停止
-    if err := session.Stream(ctx, func(audio []byte) error {
-        _, err := w.Write(audio)
-        if f, ok := w.(http.Flusher); ok {
-            f.Flush() // 立即发送，不等缓冲
-        }
-        return err
-    }); err != nil {
-        log.Printf("stream error: %v", err)
-    }
+// 推模式直接写入 HTTP response
+// 客户端断开连接时 ctx 会取消，Stream 自动停止
+if err := session.Stream(ctx, func(audio []byte) error {
+_, err := w.Write(audio)
+if f, ok := w.(http.Flusher); ok {
+f.Flush() // 立即发送，不等缓冲
+}
+return err
+}); err != nil {
+log.Printf("stream error: %v", err)
+}
 }
 ```
 
@@ -437,29 +437,29 @@ func handleTTS(w http.ResponseWriter, r *http.Request, client *bdvoice.Client, v
 
 ```go
 func synthesizeDialect(client *bdvoice.Client, voiceID int) {
-    ctx := context.Background()
+ctx := context.Background()
 
-    session, err := client.NewTTSSession(ctx, voiceID, &bdvoice.TTSConfig{
-        Lang:      bdvoice.LangChinese,    // 方言必须选 "zh"
-        Dialect:   bdvoice.DialectSichuan,  // 四川话
-        MediaType: bdvoice.MediaMP3,
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer session.Close()
+session, err := client.NewTTSSession(ctx, voiceID, &bdvoice.TTSConfig{
+Lang:      bdvoice.LangChinese,    // 方言必须选 "zh"
+Dialect:   bdvoice.DialectSichuan,  // 四川话
+MediaType: bdvoice.MediaMP3,
+})
+if err != nil {
+log.Fatal(err)
+}
+defer session.Close()
 
-    // 支持的方言常量：
-    // bdvoice.DialectShanghai  — 上海话
-    // bdvoice.DialectHenan     — 河南话
-    // bdvoice.DialectSichuan   — 四川话
-    // bdvoice.DialectHunan     — 湖南话
-    // bdvoice.DialectGuizhou   — 贵州话
+// 支持的方言常量：
+// bdvoice.DialectShanghai  — 上海话
+// bdvoice.DialectHenan     — 河南话
+// bdvoice.DialectSichuan   — 四川话
+// bdvoice.DialectHunan     — 湖南话
+// bdvoice.DialectGuizhou   — 贵州话
 
-    _ = session.SendText(ctx, "这是一段四川话合成测试。")
-    _ = session.Finish(ctx)
+_ = session.SendText(ctx, "这是一段四川话合成测试。")
+_ = session.Finish(ctx)
 
-    // ... 读取音频（同上）
+// ... 读取音频（同上）
 }
 ```
 
@@ -480,102 +480,102 @@ func synthesizeDialect(client *bdvoice.Client, voiceID int) {
 
 ```go
 import (
-    "context"
-    "fmt"
-    "io"
-    "log"
-    "os"
+"context"
+"fmt"
+"io"
+"log"
+"os"
 
-    "github.com/gtkit/bdvoice"
+"github.com/gtkit/bdvoice"
 )
 
 func streamTTS(client *bdvoice.Client) {
-    ctx := context.Background()
+ctx := context.Background()
 
-    // per 是百度预置发音人标识
-    // 常用发音人示例：
-    //   "0" — 度小美（女声）
-    //   "1" — 度小宇（男声）
-    //   "3" — 度逍遥（男声，情感合成）
-    //   "4" — 度丫丫（女声，童声）
-    //   具体发音人列表请参考百度语音合成文档
-    session, err := client.NewStreamTTSSession(ctx, "0", &bdvoice.StreamTTSConfig{
-        Spd: 5,                        // 语速 0-15，默认 5
-        Pit: 5,                        // 音调 0-15，默认 5
-        Vol: 5,                        // 音量 0-15（基础音库 0-9），默认 5
-        Aue: bdvoice.AudioEncodingMP3, // 音频格式：3=mp3, 4=pcm-16k, 5=pcm-8k, 6=wav
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer session.Close()
+// per 是百度预置发音人标识
+// 常用发音人示例：
+//   "0" — 度小美（女声）
+//   "1" — 度小宇（男声）
+//   "3" — 度逍遥（男声，情感合成）
+//   "4" — 度丫丫（女声，童声）
+//   具体发音人列表请参考百度语音合成文档
+session, err := client.NewStreamTTSSession(ctx, "0", &bdvoice.StreamTTSConfig{
+Spd: 5,                        // 语速 0-15，默认 5
+Pit: 5,                        // 音调 0-15，默认 5
+Vol: 5,                        // 音量 0-15（基础音库 0-9），默认 5
+Aue: bdvoice.AudioEncodingMP3, // 音频格式：3=mp3, 4=pcm-16k, 5=pcm-8k, 6=wav
+})
+if err != nil {
+log.Fatal(err)
+}
+defer session.Close()
 
-    // 发送文本（与 NewTTSSession 完全相同的 API）
-    // 注意：文本中加上标点有助于服务端及时切句合成，
-    // 若无标点，服务端会等待至少 60 字或 5~6 秒超时后才合成
-    if err := session.SendText(ctx, "你好，欢迎使用百度流式语音合成服务。"); err != nil {
-        log.Fatal(err)
-    }
-    if err := session.SendText(ctx, "支持多音字标注，如：重(chong2)报集团。"); err != nil {
-        log.Fatal(err)
-    }
+// 发送文本（与 NewTTSSession 完全相同的 API）
+// 注意：文本中加上标点有助于服务端及时切句合成，
+// 若无标点，服务端会等待至少 60 字或 5~6 秒超时后才合成
+if err := session.SendText(ctx, "你好，欢迎使用百度流式语音合成服务。"); err != nil {
+log.Fatal(err)
+}
+if err := session.SendText(ctx, "支持多音字标注，如：重(chong2)报集团。"); err != nil {
+log.Fatal(err)
+}
 
-    // 通知服务端所有文本已发送（必须调用，否则可能丢失缓冲文本）
-    if err := session.Finish(ctx); err != nil {
-        log.Fatal(err)
-    }
+// 通知服务端所有文本已发送（必须调用，否则可能丢失缓冲文本）
+if err := session.Finish(ctx); err != nil {
+log.Fatal(err)
+}
 
-    // 拉模式读取音频（与 NewTTSSession 完全一致）
-    f, _ := os.Create("stream_output.mp3")
-    defer f.Close()
+// 拉模式读取音频（与 NewTTSSession 完全一致）
+f, _ := os.Create("stream_output.mp3")
+defer f.Close()
 
-    for {
-        data, err := session.Read()
-        if err == io.EOF {
-            break
-        }
-        if err != nil {
-            log.Fatal(err)
-        }
-        f.Write(data)
-    }
+for {
+data, err := session.Read()
+if err == io.EOF {
+break
+}
+if err != nil {
+log.Fatal(err)
+}
+f.Write(data)
+}
 
-    fmt.Println("流式文本在线合成完成")
+fmt.Println("流式文本在线合成完成")
 }
 
 // 使用降采样和推模式的高级示例
 func streamTTSAdvanced(client *bdvoice.Client) {
-    ctx := context.Background()
+ctx := context.Background()
 
-    // 链式配置：设置音频格式 + 降采样到 16kHz
-    cfg := (&bdvoice.StreamTTSConfig{
-        Aue: bdvoice.AudioEncodingMP3,
-        Spd: 7, // 稍快语速
-    }).WithSampleRate16K() // 便捷方法：设置 audio_ctrl 降采样到 16k
+// 链式配置：设置音频格式 + 降采样到 16kHz
+cfg := (&bdvoice.StreamTTSConfig{
+Aue: bdvoice.AudioEncodingMP3,
+Spd: 7, // 稍快语速
+}).WithSampleRate16K() // 便捷方法：设置 audio_ctrl 降采样到 16k
 
-    // 如果需要显式发送 0 值，使用 setter：
-    // cfg := (&bdvoice.StreamTTSConfig{}).SetSpd(0).SetPit(0).SetVol(0)
+// 如果需要显式发送 0 值，使用 setter：
+// cfg := (&bdvoice.StreamTTSConfig{}).SetSpd(0).SetPit(0).SetVol(0)
 
-    session, err := client.NewStreamTTSSession(ctx, "4103", cfg)
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer session.Close()
+session, err := client.NewStreamTTSSession(ctx, "4103", cfg)
+if err != nil {
+log.Fatal(err)
+}
+defer session.Close()
 
-    _ = session.SendText(ctx, "这是使用推模式的高级示例。")
-    _ = session.Finish(ctx)
+_ = session.SendText(ctx, "这是使用推模式的高级示例。")
+_ = session.Finish(ctx)
 
-    // 推模式（同样与 NewTTSSession 完全一致）
-    f, _ := os.Create("stream_advanced.mp3")
-    defer f.Close()
+// 推模式（同样与 NewTTSSession 完全一致）
+f, _ := os.Create("stream_advanced.mp3")
+defer f.Close()
 
-    err = session.Stream(ctx, func(audio []byte) error {
-        _, err := f.Write(audio)
-        return err
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
+err = session.Stream(ctx, func(audio []byte) error {
+_, err := f.Write(audio)
+return err
+})
+if err != nil {
+log.Fatal(err)
+}
 }
 ```
 
@@ -586,28 +586,28 @@ SDK 提供了完整的错误类型体系，支持精细化错误处理：
 ```go
 resp, err := client.CreateVoice(ctx, req)
 if err != nil {
-    switch {
-    case bdvoice.IsAPIError(err) != nil:
-        // 百度 API 业务错误
-        // 常见错误码：216100(参数错误) 216404(voice_id不存在) 282000(服务内部错误)
-        apiErr, _ := bdvoice.IsAPIError(err)
-        log.Printf("API error: http=%d, code=%d, msg=%s",
-            apiErr.StatusCode, apiErr.Code, apiErr.Message)
+switch {
+case bdvoice.IsAPIError(err) != nil:
+// 百度 API 业务错误
+// 常见错误码：216100(参数错误) 216404(voice_id不存在) 282000(服务内部错误)
+apiErr, _ := bdvoice.IsAPIError(err)
+log.Printf("API error: http=%d, code=%d, msg=%s",
+apiErr.StatusCode, apiErr.Code, apiErr.Message)
 
-    case bdvoice.IsOAuthError(err) != nil:
-        // OAuth 鉴权错误（client_id/secret 无效等）
-        oauthErr, _ := bdvoice.IsOAuthError(err)
-        log.Printf("OAuth error: %s", oauthErr.Description)
+case bdvoice.IsOAuthError(err) != nil:
+// OAuth 鉴权错误（client_id/secret 无效等）
+oauthErr, _ := bdvoice.IsOAuthError(err)
+log.Printf("OAuth error: %s", oauthErr.Description)
 
-    case bdvoice.IsValidationError(err) != nil:
-        // 客户端参数校验错误（请求发出前就拦截）
-        valErr, _ := bdvoice.IsValidationError(err)
-        log.Printf("Validation: field=%s, reason=%s", valErr.Field, valErr.Reason)
+case bdvoice.IsValidationError(err) != nil:
+// 客户端参数校验错误（请求发出前就拦截）
+valErr, _ := bdvoice.IsValidationError(err)
+log.Printf("Validation: field=%s, reason=%s", valErr.Field, valErr.Reason)
 
-    default:
-        // 网络错误、JSON 解析错误等
-        log.Printf("Unexpected error: %v", err)
-    }
+default:
+// 网络错误、JSON 解析错误等
+log.Printf("Unexpected error: %v", err)
+}
 }
 ```
 

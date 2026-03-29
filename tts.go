@@ -79,13 +79,37 @@ func (c *Client) NewTTSSession(ctx context.Context, voiceID int, cfg *TTSConfig)
 		return nil, fmt.Errorf("bdvoice: build ws url: %w", err)
 	}
 
-	// 构建连接 header（API Key 模式需要 Authorization）
-	header := make(map[string][]string)
-	if c.authMode == AuthAPIKey {
-		header["Authorization"] = []string{c.apiKey}
+	// 建立连接并创建 session
+	session, err := c.dialSession(ctx, wsURL)
+	if err != nil {
+		return nil, err
 	}
 
-	// 建立 WebSocket 连接
+	// 发送初始化帧
+	if err := session.sendStart(cfg); err != nil {
+		session.conn.Close()
+		return nil, fmt.Errorf("bdvoice: send start frame: %w", err)
+	}
+
+	// 等待初始化确认并启动 readLoop
+	if err := session.startReadLoop(); err != nil {
+		session.conn.Close()
+		return nil, fmt.Errorf("bdvoice: wait started: %w", err)
+	}
+
+	return session, nil
+}
+
+// dialSession 建立 WebSocket 连接并创建未初始化的 TTSSession。
+// 这是 NewTTSSession 和 NewStreamTTSSession 的公共连接逻辑。
+func (c *Client) dialSession(ctx context.Context, wsURL string) (*TTSSession, error) {
+	// 构建连接 header（API Key 模式需要 Authorization）
+	var header http.Header
+	if c.authMode == AuthAPIKey {
+		header = http.Header{"Authorization": {c.apiKey}}
+	}
+
+	// 构建 dialer，继承 httpClient 的传输层配置
 	dialer := websocket.Dialer{
 		HandshakeTimeout: c.httpClient.Timeout,
 	}
@@ -94,35 +118,28 @@ func (c *Client) NewTTSSession(ctx context.Context, voiceID int, cfg *TTSConfig)
 		dialer.NetDialContext = transport.DialContext
 		dialer.TLSClientConfig = transport.TLSClientConfig
 	}
+
 	conn, _, err := dialer.DialContext(ctx, wsURL, header)
 	if err != nil {
 		return nil, fmt.Errorf("bdvoice: websocket dial: %w", err)
 	}
 
-	session := &TTSSession{
+	return &TTSSession{
 		conn:    conn,
 		audioCh: make(chan []byte, 64), // 缓冲 64 帧，避免阻塞接收
 		done:    make(chan struct{}),
 		closeCh: make(chan struct{}),
+	}, nil
+}
+
+// startReadLoop 等待 system.started 确认并启动后台接收 goroutine。
+func (s *TTSSession) startReadLoop() error {
+	if err := s.waitStarted(); err != nil {
+		return err
 	}
-
-	// 发送初始化帧
-	if err := session.sendStart(cfg); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("bdvoice: send start frame: %w", err)
-	}
-
-	// 等待初始化确认
-	if err := session.waitStarted(); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("bdvoice: wait started: %w", err)
-	}
-
-	// 启动后台接收 goroutine
-	session.readLoopStarted.Store(true)
-	go session.readLoop()
-
-	return session, nil
+	s.readLoopStarted.Store(true)
+	go s.readLoop()
+	return nil
 }
 
 // buildWSURL 构建带鉴权参数的 WebSocket URL。
@@ -237,12 +254,15 @@ func (s *TTSSession) readLoop() {
 				return
 			}
 
-			switch resp.Type {
-			case wsTypeSystemFinished:
+			switch {
+			case resp.Type == wsTypeSystemFinished:
 				// 合成完成，正常退出
 				return
 
-			case wsTypeSystemError:
+			case resp.Code != 0:
+				// 服务端返回错误（包括 system.error、text 异常等所有非零 code 响应）
+				// 文档中 type="text" + code=216103 表示文本过长，
+				// type="system.error" 表示通用服务端错误，统一处理。
 				s.setReadError(&WebSocketError{
 					Type:    resp.Type,
 					Code:    resp.Code,
